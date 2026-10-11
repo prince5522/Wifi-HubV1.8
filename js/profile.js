@@ -1,118 +1,212 @@
-import { auth, db } from './firebase.js';
-import {
-  doc,
-  getDoc,
-  setDoc,
-  serverTimestamp
-} from 'https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js';
-import {
-  onAuthStateChanged,
-  sendPasswordResetEmail,
-  updateProfile
-} from 'https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js';
-import { setupShell, $, message, friendlyError } from './common.js';
 
-setupShell();
+const $ = (selector) => document.querySelector(selector);
+
+let auth;
+let db;
 let currentUser = null;
 let currentProfile = {};
-let profileLoaded = false;
 
-function show(text, kind = '') {
-  message($('#profileMessage'), text, kind);
+function showMessage(text, type = 'error') {
+  const el = $('#profileMessage');
+  if (el) {
+    el.textContent = text;
+    el.className = `form-message ${type}`;
+  }
 }
 
-function fillFromAuth(user) {
-  $('#profileEmail').value = user.email || '';
-  $('#profileUid').value = user.uid || '';
-  $('#profileProvider').value = (user.providerData || [])
-    .map(item => item.providerId).join(', ') || 'Unknown';
-  $('#profileCreatedAt').textContent = user.metadata?.creationTime || 'Not available';
-  $('#profileLastSignIn').textContent = user.metadata?.lastSignInTime || 'Not available';
-  $('#profileAccountState').textContent = 'Signed in';
-  $('#profileName').value = user.displayName || '';
-  const chip = $('#accountChip');
-  if (chip) chip.textContent = user.displayName || user.email || 'Signed in';
+function setStatus(text) {
+  const el = $('#profileAccountState');
+  if (el) el.textContent = text;
 }
 
-async function loadUserProfile(user) {
+function explain(error) {
+  console.error('[Wi-Fi Hub Profile]', error);
+
+  const code = error?.code || '';
+  const message = error?.message || String(error);
+
+  if (code === 'permission-denied' ||
+      code === 'firestore/permission-denied') {
+    return 'Firestore access denied. Check Firestore Rules for users/{uid}.';
+  }
+
+  if (code === 'auth/network-request-failed') {
+    return 'Firebase network request failed. Check your internet connection.';
+  }
+
+  if (code === 'auth/unauthorized-domain') {
+    return 'This website domain is not authorised in Firebase Authentication.';
+  }
+
+  return `${code ? code + ': ' : ''}${message}`;
+}
+
+function fillUser(user, profile = {}) {
+  const name = profile.name || user.displayName || '';
+
+  if ($('#profileName')) $('#profileName').value = name;
+  if ($('#profileEmail')) $('#profileEmail').value = user.email || '';
+  if ($('#profileUid')) $('#profileUid').value = user.uid || '';
+
+  if ($('#profileProvider')) {
+    $('#profileProvider').value =
+      (user.providerData || [])
+        .map(provider => provider.providerId)
+        .join(', ') || 'Unknown';
+  }
+
+  if ($('#profileCreatedAt')) {
+    $('#profileCreatedAt').textContent =
+      user.metadata?.creationTime || 'Not available';
+  }
+
+  if ($('#profileLastSignIn')) {
+    $('#profileLastSignIn').textContent =
+      user.metadata?.lastSignInTime || 'Not available';
+  }
+
+  if ($('#accountChip')) {
+    $('#accountChip').textContent =
+      name || user.email || 'Signed in';
+  }
+
+  setStatus(profile.active === false ? 'Disabled' : 'Signed in');
+}
+
+async function loadProfile(user) {
   currentUser = user;
-  currentProfile = {};
-  profileLoaded = false;
-  fillFromAuth(user); // Do not wait for Firestore to show basic account information.
-  show('Signed in. Loading saved profile…');
+  fillUser(user);
+  setStatus('Signed in; loading saved profile…');
 
   try {
-    const ref = doc(db, 'users', user.uid);
-    const snap = await getDoc(ref);
+    const { doc, getDoc } = await import(
+      'https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js'
+    );
+
+    const snap = await getDoc(doc(db, 'users', user.uid));
+
     if (snap.exists()) {
       currentProfile = snap.data() || {};
-      $('#profileName').value = currentProfile.name || user.displayName || '';
-      $('#profileAccountState').textContent = currentProfile.active === false ? 'Disabled' : 'Active';
-      const chip = $('#accountChip');
-      if (chip) chip.textContent = currentProfile.name || user.displayName || user.email || 'Signed in';
-      profileLoaded = true;
-      show('Profile loaded.', 'success');
+      fillUser(user, currentProfile);
+      showMessage('Profile loaded successfully.', 'success');
     } else {
-      show('Your Firebase sign-in works, but the Firestore profile document is missing. Click Save profile to create it.', 'error');
+      currentProfile = {};
+      showMessage(
+        'Signed in successfully, but no Firestore profile exists yet. Enter your name and click Save profile.',
+        'error'
+      );
     }
   } catch (error) {
-    console.error('Wi-Fi Hub profile read error:', error);
-    show('Firebase account loaded, but Firestore profile read failed: ' + friendlyError(error), 'error');
+    showMessage('Could not load saved profile: ' + explain(error));
   }
 }
 
-onAuthStateChanged(auth, user => {
-  if (!user) {
-    currentUser = null;
-    const chip = $('#accountChip');
-    if (chip) chip.textContent = 'Not signed in';
-    location.replace('./index.html');
-    return;
+async function startProfile() {
+  setStatus('Connecting to Firebase…');
+
+  try {
+    const core = await import('./firebase.js');
+    auth = core.auth;
+    db = core.db;
+
+    const authSdk = await import(
+      'https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'
+    );
+
+    setStatus('Checking your sign-in…');
+
+    let initialStateReceived = false;
+
+    const unsubscribe = authSdk.onAuthStateChanged(
+      auth,
+      async user => {
+        initialStateReceived = true;
+
+        if (!user) {
+          setStatus('Not signed in');
+          showMessage(
+            'No signed-in Firebase account was found. Please sign in again.'
+          );
+          return;
+        }
+
+        await loadProfile(user);
+      },
+      error => {
+        setStatus('Authentication error');
+        showMessage('Firebase sign-in check failed: ' + explain(error));
+      }
+    );
+
+    // Reveal a useful error if Firebase never returns an initial auth state.
+    window.setTimeout(() => {
+      if (!initialStateReceived) {
+        setStatus('Firebase is not responding');
+        showMessage(
+          'Firebase sign-in check is taking too long. Check the browser Console for a network or import error, then refresh.'
+        );
+      }
+    }, 10000);
+
+    window.addEventListener('pagehide', unsubscribe, { once: true });
+  } catch (error) {
+    setStatus('Profile script failed');
+    showMessage(
+      'The profile could not start. Check the Firebase imports and file paths: ' +
+      explain(error)
+    );
   }
-  loadUserProfile(user).catch(error => {
-    console.error('Profile load error:', error);
-    show('Profile could not load: ' + friendlyError(error), 'error');
-  });
-});
+}
 
 $('#profileForm')?.addEventListener('submit', async event => {
   event.preventDefault();
-  if (!currentUser) {
-    show('Firebase is still checking your sign-in. Refresh and try again.', 'error');
+
+  if (!currentUser || !db) {
+    showMessage('Firebase has not finished signing in. Read the status message above.');
     return;
   }
-  const name = $('#profileName').value.trim();
+
+  const name = $('#profileName')?.value.trim();
+
   if (!name) {
-    show('Please enter a display name.', 'error');
+    showMessage('Enter your display name before saving.');
     return;
   }
+
   const button = event.currentTarget.querySelector('[type="submit"]');
   if (button) button.disabled = true;
+
   try {
+    const { doc, getDoc, setDoc, serverTimestamp } = await import(
+      'https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js'
+    );
+    const { updateProfile } = await import(
+      'https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'
+    );
+
     const ref = doc(db, 'users', currentUser.uid);
     const snap = await getDoc(ref);
+
     const data = {
       name,
       email: currentUser.email || '',
       updatedAt: serverTimestamp()
     };
+
     if (!snap.exists()) {
-      // Required by the current firestore.rules create condition.
       data.role = 'user';
       data.active = true;
       data.createdAt = serverTimestamp();
     }
+
     await updateProfile(currentUser, { displayName: name });
     await setDoc(ref, data, { merge: true });
+
     currentProfile = { ...currentProfile, ...data, name };
-    profileLoaded = true;
-    const chip = $('#accountChip');
-    if (chip) chip.textContent = name;
-    $('#profileAccountState').textContent = currentProfile.active === false ? 'Disabled' : 'Active';
-    show('Profile saved successfully.', 'success');
+    fillUser(currentUser, currentProfile);
+    showMessage('Profile saved successfully.', 'success');
   } catch (error) {
-    console.error('Wi-Fi Hub profile save error:', error);
-    show('Could not save profile: ' + friendlyError(error), 'error');
+    showMessage('Could not save profile: ' + explain(error));
   } finally {
     if (button) button.disabled = false;
   }
@@ -120,10 +214,19 @@ $('#profileForm')?.addEventListener('submit', async event => {
 
 $('#sendResetEmail')?.addEventListener('click', async () => {
   try {
-    if (!currentUser?.email) throw new Error('No email address is attached to this account.');
+    if (!currentUser?.email) {
+      throw new Error('No email address is attached to this account.');
+    }
+
+    const { sendPasswordResetEmail } = await import(
+      'https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'
+    );
+
     await sendPasswordResetEmail(auth, currentUser.email);
-    show('Password reset email sent.', 'success');
+    showMessage('Password reset email sent.', 'success');
   } catch (error) {
-    show(friendlyError(error), 'error');
+    showMessage('Password reset failed: ' + explain(error));
   }
 });
+
+startProfile();
