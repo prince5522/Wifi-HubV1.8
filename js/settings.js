@@ -1,0 +1,12 @@
+import { setupShell, readPreferences, applyPreferences } from './common.js';
+setupShell();
+const $=id=>document.getElementById(id);
+const ids=['themeChoice','accentChoice','opacityChoice','blurChoice','languageChoice','fontChoice','offlineModeChoice'];
+const message=$('preferencesMessage');
+function say(t,kind=''){if(message){message.textContent=t;message.classList.remove('success','error');if(kind)message.classList.add(kind);}}
+function prefsFromForm(){const old=readPreferences();return {...old,theme:$('themeChoice')?.value||'system',accent:$('accentChoice')?.value||'#4285f4',opacity:Number($('opacityChoice')?.value??82),blur:Number($('blurChoice')?.value??18),language:$('languageChoice')?.value||'en',font:$('fontChoice')?.value||'system',offlineMode:!!$('offlineModeChoice')?.checked};}
+function fill(){const p=readPreferences();if($('themeChoice'))$('themeChoice').value=['light','dark','system'].includes(p.theme)?p.theme:'system';for(const [id,key] of [['accentChoice','accent'],['opacityChoice','opacity'],['blurChoice','blur'],['languageChoice','language'],['fontChoice','font']])if($(id)&&p[key]!=null)$(id).value=p[key];if($('offlineModeChoice'))$('offlineModeChoice').checked=!!p.offlineMode;syncLabels();applyPreferences(p);}
+function syncLabels(){if($('opacityValue')&&$('opacityChoice'))$('opacityValue').textContent=$('opacityChoice').value+'%';if($('blurValue')&&$('blurChoice'))$('blurValue').textContent=$('blurChoice').value+'px';}
+function preview(){const p=prefsFromForm();applyPreferences(p);syncLabels();}
+function save(e){e?.preventDefault();try{const p=prefsFromForm();localStorage.setItem('wifiHubPreferencesV1',JSON.stringify(p));applyPreferences(p);say('Appearance saved successfully. Your choice will be used across Wi-Fi Hub on this browser.','success');}catch(err){console.error(err);say('Save failed. Check that this site is allowed to use browser storage.','error');}}
+fill();ids.forEach(id=>{const el=$(id);if(el){el.addEventListener('input',preview);el.addEventListener('change',preview);}});$('savePreferences')?.addEventListener('click',save);$('resetPreferences')?.addEventListener('click',()=>{try{localStorage.removeItem('wifiHubPreferencesV1');fill();say('Reset to System theme. Click Save appearance to confirm.');}catch(e){say('Could not reset preferences.','error');}});$('replayTutorial')?.addEventListener('click',()=>{localStorage.removeItem('wifiHubTutorialSeenV1');location.href='./home.html';});
